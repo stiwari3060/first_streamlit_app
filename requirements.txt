@@ -1,1 +1,2 @@
-
+#requirements.txt
+snowflae-connector-python
