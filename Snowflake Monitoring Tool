@@ -1,0 +1,132 @@
+# Import python packages
+import streamlit as st
+import pandas as pd
+from snowflake.snowpark.context import get_active_session
+from snowflake.snowpark.functions import col
+import plotly.express as px 
+
+#Header
+st.title(":blue[Snowflake Account Admin App] :snowflake:")
+st.subheader("This app is for monitoring of snowflake account.")
+#st.markdown("This app is way forward alternative to snowflake dashboard - https://medium.com/@snowflakewiki/building-dashboard-for-snowflake-account-monitoring-349b93c7ea39")
+
+st.divider()
+
+# Get the current credentials
+session = get_active_session()
+credits_used_df = session.sql
+
+#############################################
+
+# Days Remaining for Free Snowflake Account Expiry
+trail_days_left_sql = f"select datediff(d,current_date(),end_date - 1) as days_left_in_free_trial from snowflake.organization_usage.contract_items"
+trail_days_left_df = session.sql(trail_days_left_sql)
+pandas_trail_days_left_df = trail_days_left_df.to_pandas()
+trail_days_left_tile = pandas_trail_days_left_df.iloc[0].values
+
+# Remaining Free Usage of given $400
+remaining_usage_sql = f"select round (400 - ((select round ((storage_bytes*effective_rate), 2) as storage_cost from (select (avg(a.storage_bytes + a.stage_bytes + a.failsafe_bytes) / power(1024, 4)) as storage_bytes, b.effective_rate from snowflake.account_usage.storage_usage a join (select effective_rate from snowflake.organization_usage.rate_sheet_daily where usage_type = 'storage' and date = current_date() - 1) b on 1 = 1 where a.USAGE_DATE = current_date() -1 group by all)) + (select credits_used * effective_rate as total_credits_used from (select sum(credits_used) as credits_used, d.effective_rate from snowflake.account_usage.metering_history c join (select effective_rate from snowflake.organization_usage.rate_sheet_daily where usage_type = 'compute' and date = current_date() - 1) d on 1 = 1 group by all))), 2)"
+remaining_usage_df = session.sql(remaining_usage_sql)
+pandas_remaining_usage_df = remaining_usage_df.to_pandas()
+remaining_usage_tile = pandas_remaining_usage_df.iloc[0].values
+
+# Column formatting
+col1, col2 = st.columns(2)
+col1.metric("Days Remaining for Free Snowflake Account Expiry","{:,}".format(int(trail_days_left_tile))) 
+col2.metric("Remaining Free Usage of given $400",remaining_usage_tile)
+
+#############################################
+
+# Compute Credits Used
+credits_used_sql = f"select sum(credits_used) from snowflake.account_usage.metering_history"
+credits_used_df = session.sql(credits_used_sql)
+pandas_credits_used_df = credits_used_df.to_pandas()
+credits_used_tile = pandas_credits_used_df.iloc[0].values
+
+# Storage Cost in $
+storage_cost_sql = f"select round ((storage_bytes*effective_rate), 2) as storage_cost from (select (avg(a.storage_bytes + a.stage_bytes + a.failsafe_bytes) / power(1024, 4)) as storage_bytes, b.effective_rate from snowflake.account_usage.storage_usage a join (select effective_rate from snowflake.organization_usage.rate_sheet_daily where usage_type = 'storage' and date = current_date() - 1) b on 1 = 1 where a.USAGE_DATE = current_date() -1 group by all)"
+storage_cost_df = session.sql(storage_cost_sql)
+pandas_storage_cost_df = storage_cost_df.to_pandas()
+#storage_cost_tile = pandas_storage_cost_df.loc[0].values
+#storage_cost_tile = pandas_storage_cost_df.iloc[].values
+
+# Column formatting
+col3, col4 = st.columns(2)
+col3.metric("Compute Credits Used","{:,}".format(int(credits_used_tile))) 
+#col4.metric("Storage Cost ($)",storage_cost_tile)
+
+st.divider()
+#############################################
+
+# Credit Usage by Warehouse
+wh_credits_used_sql = f"select warehouse_name,sum(credits_used) as total_credits_used from snowflake.account_usage.warehouse_metering_history group by 1 order by 2 asc"
+wh_credits_used_df = session.sql(wh_credits_used_sql)
+pandas_wh_credits_used_df = wh_credits_used_df.to_pandas()
+
+fig_wh_credits_used=px.bar(pandas_wh_credits_used_df,x='TOTAL_CREDITS_USED',y='WAREHOUSE_NAME',orientation='h',title="Credit Usage by Warehouse")
+fig_wh_credits_used.update_traces(marker_color='orange')
+
+# Storage in MB
+storage_mb_sql = f"select 'Database Storage' as Storage_type, avg (storage_bytes) / power(1024, 2) as Storage_in_MB from snowflake.account_usage.storage_usage where usage_date = current_date() - 1 union all select 'Stage Storage' as Storage_type, avg (stage_bytes) / power(1024, 2) as Storage_in_MB from snowflake.account_usage.storage_usage where usage_date = current_date() - 1 union all select 'Failsafe Storage' as Storage_type, avg (failsafe_bytes) / power(1024, 2) as Storage_in_MB from snowflake.account_usage.storage_usage where usage_date = current_date() - 1 union all select 'Total Storage' as Storage_type, avg (storage_bytes + stage_bytes + failsafe_bytes) / power(1024, 2) as Storage_in_MB from snowflake.account_usage.storage_usage where usage_date = current_date() - 1"
+storage_mb_df = session.sql(storage_mb_sql)
+pandas_storage_mb_df = storage_mb_df.to_pandas()
+
+fig_storage_mb_df=px.bar(pandas_storage_mb_df,x='STORAGE_IN_MB',y='STORAGE_TYPE',orientation='h',title="Storage in MB")
+fig_storage_mb_df.update_traces(marker_color='green')
+
+# Container: Credit Usage & Storage
+container1 = st.container()
+with container1:plot1, plot2 = st.columns(2)
+with plot1: st.plotly_chart(fig_wh_credits_used, use_container_width=True)
+with plot2: st.plotly_chart(fig_storage_mb_df, use_container_width=True)
+
+st.divider()
+#############################################
+####################My Code##################
+# Top Running Queries
+
+#st.markdown(":blue[Top n longest-running queries with respect to Warehouse:]")
+top_running_sql = f"SELECT WAREHOUSE_NAME,count(query_id) as TOTAL_QUERY_COUNT FROM snowflake.account_usage.query_history Q WHERE TO_DATE(Q.start_time) > DATEADD(day,-7,TO_DATE(CURRENT_TIMESTAMP())) AND (total_elapsed_time > 0 AND total_elapsed_time >600 AND error_code IS NULL AND partitions_scanned IS NOT NULL) AND warehouse_name is not null group by warehouse_name LIMIT 100"
+top_running_queries = session.sql(top_running_sql)
+pandas_top_running_queries = top_running_queries.to_pandas()
+
+fig_wh_query_count=px.bar(pandas_top_running_queries,x='TOTAL_QUERY_COUNT',y='WAREHOUSE_NAME',orientation='h',title="Top n longest-running queries with respect to Warehouse")
+fig_wh_query_count.update_traces(marker_color='green')
+
+st.plotly_chart(fig_wh_query_count, use_container_width=True)
+
+                            
+st.divider()
+st.markdown(":blue[Top n longest-running queries:]")
+top_running_sql = f"SELECT query_id,ROW_NUMBER() OVER(ORDER BY partitions_scanned DESC) AS query_id_int,query_text,warehouse_name,total_elapsed_time/1000 AS query_execution_time_seconds,partitions_scanned,partitions_total FROM snowflake.account_usage.query_history Q WHERE  TO_DATE(Q.start_time) > DATEADD(day,-7,TO_DATE(CURRENT_TIMESTAMP())) AND (total_elapsed_time > 0 AND total_elapsed_time >600 AND error_code IS NULL AND partitions_scanned IS NOT NULL) AND warehouse_name is not null ORDER BY total_elapsed_time desc LIMIT 100"
+top_running_queries = session.sql(top_running_sql)
+pandas_top_running_queries = top_running_queries.to_pandas()
+st.dataframe(pandas_top_running_queries, use_container_width=True)
+
+####################My Code #################
+st.divider()
+#############################################
+
+#Credit Usage Overtime
+credit_usage_overtime_sql = f"select start_time::date as usage_date, warehouse_name, sum(credits_used) as total_credits_used from snowflake.account_usage.warehouse_metering_history group by 1,2 order by 2,1 limit 1"
+credit_usage_overtime_df = session.sql(credit_usage_overtime_sql)
+pandas_credit_usage_overtime_df = credit_usage_overtime_df.to_pandas()
+
+fig_credit_usage_overtime_df=px.bar(pandas_credit_usage_overtime_df,x='USAGE_DATE',y='TOTAL_CREDITS_USED',color='WAREHOUSE_NAME',orientation='v',title="Credits Used Overtime", barmode="group")
+st.plotly_chart(fig_credit_usage_overtime_df, use_container_width=True)
+
+st.divider()
+
+#############################################
+
+# Users vs WH Usage
+user_wh_usage_sql = f"select warehouse_name, user_name, count(*) as no_of_queries from snowflake.account_usage.query_history where user_name <> 'system' and warehouse_name is not null group by 1,2"
+user_wh_usage_df = session.sql(user_wh_usage_sql)
+pandas_user_wh_usage_df = user_wh_usage_df.to_pandas()
+
+fig_user_wh_usage_df=px.bar(pandas_user_wh_usage_df,x='NO_OF_QUERIES',y='USER_NAME',color='WAREHOUSE_NAME',orientation='h',title="Users vs WH Usage")
+st.plotly_chart(fig_user_wh_usage_df, use_container_width=True)
+
+st.divider()
+
+#############################################use database demo_db;
